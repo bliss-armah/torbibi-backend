@@ -1,0 +1,283 @@
+generator client {
+  provider      = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  customer
+  shop_owner
+  admin
+}
+
+enum OtpType {
+  login
+  register
+  reset
+}
+
+enum ShopStatus {
+  active
+  inactive
+  suspended
+}
+
+enum ProductStatus {
+  active
+  draft
+  archived
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  processing
+  shipped
+  delivered
+  cancelled
+  refunded
+}
+
+enum PaymentStatus {
+  pending
+  paid
+  failed
+  refunded
+}
+
+// Payout lifecycle: pending → processing (transfer initiated) → paid | failed
+enum PayoutStatus {
+  pending
+  processing
+  paid
+  failed
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(uuid())
+  phone           String    @unique
+  name            String?
+  email           String?   @unique
+  role            UserRole  @default(customer)
+  isPhoneVerified Boolean   @default(false) @map("is_phone_verified")
+  isActive        Boolean   @default(true)  @map("is_active")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt      @map("updated_at")
+
+  shops  Shop[]
+  orders Order[]
+
+  @@map("users")
+}
+
+model Otp {
+  id        String   @id @default(uuid())
+  phone     String
+  code      String
+  type      OtpType
+  expiresAt DateTime @map("expires_at")
+  verified  Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([phone, type])
+  @@index([expiresAt])
+  @@map("otps")
+}
+
+model Shop {
+  id             String     @id @default(uuid())
+  ownerId        String     @map("owner_id")
+  name           String
+  slug           String     @unique
+  description    String?
+  logoUrl        String?    @map("logo_url")
+  // Cloudinary public_id for the logo — stored so we can delete/replace it
+  logoPublicId   String?    @map("logo_public_id")
+  bannerUrl      String?    @map("banner_url")
+  bannerPublicId String?    @map("banner_public_id")
+  phone          String
+  email          String?
+  // Stored as JSON: { region, city, area?, digitalAddress? }
+  address        Json?
+  status         ShopStatus @default(active)
+  currency       String     @default("GHS")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt      @map("updated_at")
+
+  owner             User               @relation(fields: [ownerId], references: [id])
+  products          Product[]
+  orders            Order[]
+  payments          Payment[]
+  orderCounter      OrderCounter?
+  payouts           Payout[]
+  transferRecipient TransferRecipient?
+
+  @@index([ownerId])
+  @@index([status])
+  @@map("shops")
+}
+
+model Product {
+  id             String        @id @default(uuid())
+  shopId         String        @map("shop_id")
+  name           String
+  slug           String
+  description    String?
+  // Stored in pesewas (1 GHS = 100 pesewas) — avoids floating-point arithmetic
+  price          Int
+  compareAtPrice Int?          @map("compare_at_price")
+  sku            String?
+  quantity       Int           @default(0)
+  trackInventory Boolean       @default(false) @map("track_inventory")
+  // Stored as JSON: ProductImage[] { url, publicId, alt, isPrimary }
+  // publicId added for Cloudinary delete/replace operations
+  images         Json          @default("[]")
+  categoryId     String?       @map("category_id")
+  tags           String[]      @default([])
+  status         ProductStatus @default(draft)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt      @map("updated_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, slug])
+  @@index([shopId])
+  @@index([shopId, status])
+  @@index([shopId, createdAt(sort: Desc)])
+  @@map("products")
+}
+
+model Order {
+  id               String        @id @default(uuid())
+  // Human-readable: TRB-000001 — generated via OrderCounter
+  orderNumber      String        @unique @map("order_number")
+  shopId           String        @map("shop_id")
+  customerId       String        @map("customer_id")
+  customerPhone    String        @map("customer_phone")
+  // Snapshot of line items at time of order — not product references
+  items            Json
+  subtotal         Int
+  deliveryFee      Int           @default(0) @map("delivery_fee")
+  total            Int
+  status           OrderStatus   @default(pending)
+  paymentStatus    PaymentStatus @default(pending) @map("payment_status")
+  paymentReference String?       @map("payment_reference")
+  // Snapshot of delivery address
+  shippingAddress  Json          @map("shipping_address")
+  notes            String?
+  cancelReason     String?       @map("cancel_reason")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt      @map("updated_at")
+
+  shop     Shop      @relation(fields: [shopId], references: [id])
+  customer User      @relation(fields: [customerId], references: [id])
+  payments Payment[]
+  payouts  Payout[]
+
+  @@index([shopId])
+  @@index([shopId, status])
+  @@index([shopId, createdAt(sort: Desc)])
+  @@index([customerId])
+  @@index([paymentReference])
+  @@map("orders")
+}
+
+model Payment {
+  id        String        @id @default(uuid())
+  orderId   String        @map("order_id")
+  shopId    String        @map("shop_id")
+  amount    Int
+  currency  String        @default("GHS")
+  provider  String        @default("paystack")
+  reference String        @unique
+  status    PaymentStatus @default(pending)
+  channel   String?
+  metadata  Json?
+  // Aggregator commission fields — populated when payment is verified
+  // commissionRate: e.g. 0.05 for 5%, configurable via PLATFORM_COMMISSION_RATE env
+  commissionRate   Float? @map("commission_rate")
+  commissionAmount Int?   @map("commission_amount")
+  // netAmount = amount - commissionAmount (what the shop owner receives)
+  netAmount        Int?   @map("net_amount")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt      @map("updated_at")
+
+  order  Order  @relation(fields: [orderId], references: [id])
+  shop   Shop   @relation(fields: [shopId], references: [id])
+  payout Payout?
+
+  @@index([orderId])
+  @@index([shopId])
+  @@map("payments")
+}
+
+// Stores Paystack transfer recipient codes per shop.
+// A shop must register their mobile money / bank details before payouts can be sent.
+model TransferRecipient {
+  id            String   @id @default(uuid())
+  shopId        String   @unique @map("shop_id")
+  recipientCode String   @map("recipient_code")  // Paystack recipient_code (e.g. RCP_xxx)
+  type          String   // 'mobile_money' | 'ghipss'
+  accountName   String   @map("account_name")
+  // For mobile money: phone number. For bank: account number.
+  accountNumber String   @map("account_number")
+  // Mobile money: 'MTN' | 'ATL' | 'VOD'. Bank: Paystack bank code.
+  bankCode      String   @map("bank_code")
+  currency      String   @default("GHS")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt      @map("updated_at")
+
+  shop Shop @relation(fields: [shopId], references: [id])
+
+  @@map("transfer_recipients")
+}
+
+// Tracks money owed and sent to shop owners.
+// One Payout per Payment — created after payment is verified and commission deducted.
+model Payout {
+  id            String       @id @default(uuid())
+  shopId        String       @map("shop_id")
+  paymentId     String       @unique @map("payment_id")
+  orderId       String       @map("order_id")
+  // Net amount in pesewas (order total minus platform commission)
+  amount        Int
+  status        PayoutStatus @default(pending)
+  // Our internal payout reference (PAY-{uuid})
+  reference     String       @unique
+  // Paystack transfer_code — populated when initiateTransfer is called
+  transferCode  String?      @map("transfer_code")
+  failureReason String?      @map("failure_reason")
+  paidAt        DateTime?    @map("paid_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt      @map("updated_at")
+
+  shop    Shop    @relation(fields: [shopId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+  order   Order   @relation(fields: [orderId], references: [id])
+
+  @@index([shopId])
+  @@index([status])
+  @@index([orderId])
+  @@map("payouts")
+}
+
+// Atomic per-shop order number counter.
+// upsert + increment on this row is safe under concurrent load
+// because PostgreSQL serializes the ON CONFLICT DO UPDATE on the locked row.
+model OrderCounter {
+  shopId  String @id @map("shop_id")
+  counter Int    @default(0)
+
+  shop Shop @relation(fields: [shopId], references: [id])
+
+  @@map("order_counters")
+}

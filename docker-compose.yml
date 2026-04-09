@@ -1,0 +1,140 @@
+networks:
+  torbibi_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
+services:
+
+  # ── API Server ────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    command:
+      - npx
+      - ts-node-dev
+      - --respawn
+      - --transpile-only
+      - --exit-child
+      - --watch
+      - src
+      - src/index.ts
+    ports:
+      - "4030:4030"
+    volumes:
+      - ./src:/app/src:cached
+      - ./prisma:/app/prisma:cached
+      - ./tsconfig.json:/app/tsconfig.json:cached
+      - ./logs:/app/logs
+    environment:
+      NODE_ENV: development
+      PORT: 4030
+      DATABASE_URL: postgresql://${DB_USER:-torbibi_user}:${DB_PASSWORD:-1738}@postgres:5432/${DB_NAME:-torbibi_db}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      ARKESEL_API_KEY: ${ARKESEL_API_KEY}
+      ARKESEL_SENDER_ID: ${ARKESEL_SENDER_ID:-TORBIBI}
+      HUBTEL_CLIENT_ID: ${HUBTEL_CLIENT_ID}
+      HUBTEL_CLIENT_SECRET: ${HUBTEL_CLIENT_SECRET}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
+      PAYSTACK_WEBHOOK_SECRET: ${PAYSTACK_WEBHOOK_SECRET}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - torbibi_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4030/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  # ── Background Worker ─────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    command:
+      - npx
+      - ts-node-dev
+      - --respawn
+      - --transpile-only
+      - --exit-child
+      - --watch
+      - src
+      - src/interface/workers/index.ts
+    volumes:
+      - ./src:/app/src:cached
+      - ./prisma:/app/prisma:cached
+      - ./tsconfig.json:/app/tsconfig.json:cached
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${DB_USER:-torbibi_user}:${DB_PASSWORD:-1738}@postgres:5432/${DB_NAME:-torbibi_db}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ARKESEL_API_KEY: ${ARKESEL_API_KEY}
+      ARKESEL_SENDER_ID: ${ARKESEL_SENDER_ID:-TORBIBI}
+      HUBTEL_CLIENT_ID: ${HUBTEL_CLIENT_ID}
+      HUBTEL_CLIENT_SECRET: ${HUBTEL_CLIENT_SECRET}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
+      PLATFORM_COMMISSION_RATE: ${PLATFORM_COMMISSION_RATE:-0.05}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - torbibi_network
+    restart: unless-stopped
+
+  # ── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-torbibi_db}
+      POSTGRES_USER: ${DB_USER:-torbibi_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-1738}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - torbibi_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-torbibi_user} -d ${DB_NAME:-torbibi_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+      --save 900 1
+      --save 300 10
+    volumes:
+      - redis_data:/data
+    networks:
+      - torbibi_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

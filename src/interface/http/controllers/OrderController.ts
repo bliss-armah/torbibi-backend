@@ -1,0 +1,219 @@
+import { Request, Response } from 'express';
+import { CreateOrderUseCase } from '../../../application/orders/use-cases/CreateOrder';
+import { OrderRepository } from '../../../infrastructure/database/repositories/OrderRepository';
+import { ProductRepository } from '../../../infrastructure/database/repositories/ProductRepository';
+import { ShopRepository } from '../../../infrastructure/database/repositories/ShopRepository';
+import { UserRepository } from '../../../infrastructure/database/repositories/UserRepository';
+import { PaymentRepository } from '../../../infrastructure/database/repositories/PaymentRepository';
+import { PayoutRepository } from '../../../infrastructure/database/repositories/PayoutRepository';
+import { CreateOrderDto, UpdateOrderStatusDto } from '../../../application/orders/dtos/order.dto';
+import { ForbiddenError, NotFoundError, ValidationError } from '../../../shared/errors';
+import { parsePagination } from '../../../shared/utils/pagination';
+import { paystackService } from '../../../infrastructure/payments/PaystackService';
+import { enqueuePaymentVerification } from '../../../infrastructure/queue/producers/payment.producer';
+import { v4 as uuidv4 } from 'uuid';
+import { logger } from '../../../shared/utils/logger';
+
+const orderRepo = new OrderRepository();
+const productRepo = new ProductRepository();
+const shopRepo = new ShopRepository();
+const userRepo = new UserRepository();
+const paymentRepo = new PaymentRepository();
+const payoutRepo = new PayoutRepository();
+const createOrderUseCase = new CreateOrderUseCase(orderRepo, productRepo, shopRepo, userRepo);
+
+export class OrderController {
+  static async create(req: Request, res: Response): Promise<void> {
+    const { shopId } = req.params;
+    const dto = req.body as CreateOrderDto;
+    const order = await createOrderUseCase.execute(shopId, req.user!.sub, dto);
+
+    const user = await userRepo.findById(req.user!.sub);
+    const reference = `TRB-${uuidv4().slice(0, 8).toUpperCase()}`;
+
+    let paymentUrl: string | undefined;
+
+    if (user?.email) {
+      const paystack = await paystackService.initializePayment({
+        email: user.email,
+        amount: order.total,
+        reference,
+        phone: order.customerPhone,
+        metadata: { orderId: order.id, shopId },
+        callbackUrl: `${process.env.APP_URL}/api/v1/payments/callback`,
+      });
+      paymentUrl = paystack.authorizationUrl;
+
+      // Persist the Payment record immediately so the worker can find it by reference.
+      // This also gives us a paper trail even if the customer never completes payment.
+      await paymentRepo.create({
+        orderId: order.id,
+        shopId,
+        amount: order.total,
+        reference,
+        metadata: { orderId: order.id, shopId },
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      data: {
+        order: order.toJSON(),
+        paymentUrl,
+        reference,
+      },
+    });
+  }
+
+  static async getMyOrders(req: Request, res: Response): Promise<void> {
+    const pagination = parsePagination(req.query as Record<string, string>);
+    const result = await orderRepo.findByCustomerId(req.user!.sub, pagination);
+    res.status(200).json({ success: true, data: result });
+  }
+
+  static async getOne(req: Request, res: Response): Promise<void> {
+    const { orderId } = req.params;
+    const order = await orderRepo.findById(orderId);
+    if (!order) throw new NotFoundError('Order');
+
+    const isOwner = order.customerId === req.user!.sub;
+    const shop = await shopRepo.findById(order.shopId);
+    const isShopOwner = shop?.isOwnedBy(req.user!.sub) ?? false;
+
+    if (!isOwner && !isShopOwner) throw new ForbiddenError('Access denied');
+
+    res.status(200).json({ success: true, data: { order: order.toJSON() } });
+  }
+
+  static async listForShop(req: Request, res: Response): Promise<void> {
+    const { shopId } = req.params;
+    const shop = await shopRepo.findById(shopId);
+    if (!shop) throw new NotFoundError('Shop');
+    if (!shop.isOwnedBy(req.user!.sub)) throw new ForbiddenError('You do not own this shop');
+
+    const pagination = parsePagination(req.query as Record<string, string>);
+    const filters = {
+      status: req.query.status as import('../../../domain/orders/entities/Order').OrderStatus | undefined,
+      paymentStatus: req.query.paymentStatus as import('../../../domain/orders/entities/Order').PaymentStatus | undefined,
+    };
+
+    const result = await orderRepo.findByShopId(shopId, pagination, filters);
+    res.status(200).json({ success: true, data: result });
+  }
+
+  static async updateStatus(req: Request, res: Response): Promise<void> {
+    const { shopId, orderId } = req.params;
+    const dto = req.body as UpdateOrderStatusDto;
+
+    const shop = await shopRepo.findById(shopId);
+    if (!shop) throw new NotFoundError('Shop');
+    if (!shop.isOwnedBy(req.user!.sub)) throw new ForbiddenError('You do not own this shop');
+
+    const order = await orderRepo.findByIdAndShopId(orderId, shopId);
+    if (!order) throw new NotFoundError('Order');
+
+    switch (dto.status) {
+      case 'confirmed': order.confirm(); break;
+      case 'processing': order.startProcessing(); break;
+      case 'shipped': order.markShipped(); break;
+      case 'delivered': order.markDelivered(); break;
+      case 'cancelled':
+        if (!dto.cancelReason) throw new ValidationError('Cancel reason is required', { cancelReason: ['Required'] });
+        order.cancel(dto.cancelReason);
+        break;
+    }
+
+    await orderRepo.update(order);
+    res.status(200).json({ success: true, data: { order: order.toJSON() } });
+  }
+
+  /**
+   * Paystack webhook handler.
+   *
+   * Handles both charge events (payment collected from customer)
+   * and transfer events (payout sent to shop owner).
+   *
+   * NOTE: app.ts applies express.raw() to this route so req.body is a Buffer.
+   * We must call .toString() before JSON.parse() for both signature validation
+   * and event parsing. Using JSON.stringify(buffer) would produce garbage.
+   */
+  static async paystackWebhook(req: Request, res: Response): Promise<void> {
+    const signature = req.headers['x-paystack-signature'] as string;
+
+    // req.body is a Buffer (express.raw middleware)
+    const rawBody = (req.body as Buffer).toString('utf-8');
+
+    if (!paystackService.validateWebhookSignature(rawBody, signature)) {
+      res.status(401).json({ error: 'Invalid signature' });
+      return;
+    }
+
+    const payload = JSON.parse(rawBody) as {
+      event: string;
+      data: Record<string, unknown>;
+    };
+
+    // Acknowledge immediately — Paystack requires a 200 within 10 seconds
+    res.status(200).json({ received: true });
+
+    const { event, data } = payload;
+
+    // ─── Charge events (customer payment) ────────────────────────────────────
+    if (event === 'charge.success') {
+      const chargeData = data as {
+        reference: string;
+        metadata: { orderId: string; shopId: string };
+      };
+
+      // Defer verification with a 2s delay to handle race conditions between
+      // webhook delivery and our DB writes completing
+      await enqueuePaymentVerification(
+        {
+          orderId: chargeData.metadata.orderId,
+          reference: chargeData.reference,
+          shopId: chargeData.metadata.shopId,
+        },
+        2000
+      );
+    }
+
+    // ─── Transfer events (payout to shop owner) ───────────────────────────────
+    if (event === 'transfer.success' || event === 'transfer.failed' || event === 'transfer.reversed') {
+      const transferData = data as {
+        transfer_code: string;
+        reference: string;
+        status: string;
+      };
+
+      const payout = await payoutRepo.findByTransferCode(transferData.transfer_code);
+      if (!payout) {
+        logger.warn('Transfer webhook: no matching payout found', {
+          transferCode: transferData.transfer_code,
+        });
+        return;
+      }
+
+      if (event === 'transfer.success') {
+        await payoutRepo.update(payout.id, {
+          status: 'paid',
+          paidAt: new Date(),
+        });
+        logger.info('Payout completed', {
+          payoutId: payout.id,
+          amount: payout.amount,
+          shopId: payout.shopId,
+        });
+      } else {
+        await payoutRepo.update(payout.id, {
+          status: 'failed',
+          failureReason: `Transfer ${event.replace('transfer.', '')} — code: ${transferData.transfer_code}`,
+        });
+        logger.warn('Payout transfer failed', {
+          payoutId: payout.id,
+          event,
+          transferCode: transferData.transfer_code,
+        });
+      }
+    }
+  }
+}
