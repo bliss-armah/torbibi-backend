@@ -5,7 +5,6 @@ import { ProductRepository } from '../../../infrastructure/database/repositories
 import { ShopRepository } from '../../../infrastructure/database/repositories/ShopRepository';
 import { UserRepository } from '../../../infrastructure/database/repositories/UserRepository';
 import { PaymentRepository } from '../../../infrastructure/database/repositories/PaymentRepository';
-import { PayoutRepository } from '../../../infrastructure/database/repositories/PayoutRepository';
 import { CreateOrderDto, UpdateOrderStatusDto } from '../../../application/orders/dtos/order.dto';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../../shared/errors';
 import { User } from '../../../domain/users/entities/User';
@@ -13,17 +12,16 @@ import { parsePagination } from '../../../shared/utils/pagination';
 import { paystackService } from '../../../infrastructure/payments/PaystackService';
 import { enqueuePaymentVerification } from '../../../infrastructure/queue/producers/payment.producer';
 import { enqueueSms } from '../../../infrastructure/queue/producers/sms.producer';
-import { enqueuePayout } from '../../../infrastructure/queue/producers/payout.producer';
-import { DEFAULT_COMMISSION_RATE } from '../../../shared/constants';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../../shared/utils/logger';
+import prisma from '../../../infrastructure/database/prisma';
+
 
 const orderRepo = new OrderRepository();
 const productRepo = new ProductRepository();
 const shopRepo = new ShopRepository();
 const userRepo = new UserRepository();
 const paymentRepo = new PaymentRepository();
-const payoutRepo = new PayoutRepository();
 const createOrderUseCase = new CreateOrderUseCase(orderRepo, productRepo, shopRepo, userRepo);
 
 export class OrderController {
@@ -59,8 +57,11 @@ export class OrderController {
       dto.email ??
       `${order.customerPhone.replace(/\D/g, '')}@checkout.torbibi.com`;
 
-    // Fetch shop slug so the callback can land on the right storefront confirmation page
-    const shop = await shopRepo.findById(shopId);
+    // Fetch shop for slug (callback URL) and subaccount code (split payments)
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: { slug: true, subaccountCode: true },
+    });
     const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:3002';
     const callbackUrl = `${frontendUrl}/${shop?.slug ?? shopId}/checkout/confirmation?orderId=${order.id}&orderNumber=${encodeURIComponent(order.orderNumber)}`;
 
@@ -71,6 +72,9 @@ export class OrderController {
       phone: order.customerPhone,
       metadata: { orderId: order.id, shopId },
       callbackUrl,
+      // If shop has registered a subaccount, Paystack splits automatically at payment time
+      subaccount: shop?.subaccountCode ?? undefined,
+      bearer: 'subaccount', // shop bears Paystack's transaction fee; platform earns via subscriptions
     });
 
     // Persist the Payment record immediately so the worker can find it by reference.
@@ -210,31 +214,10 @@ export class OrderController {
       order.markPaymentReceived(reference);
       await orderRepo.update(order);
 
-      // 2. Update payment record with commission breakdown
-      const commissionRate = DEFAULT_COMMISSION_RATE;
-      const commissionAmount = Math.floor(result.amount * commissionRate);
-      const netAmount = result.amount - commissionAmount;
+      // 2. Update payment record — split payment already handled by Paystack subaccount
+      await paymentRepo.update(payment.id, { status: 'paid', channel: result.channel });
 
-      const updatedPayment = await paymentRepo.update(payment.id, {
-        status: 'paid',
-        channel: result.channel,
-        commissionRate,
-        commissionAmount,
-        netAmount,
-      });
-
-      // 3. Create payout record and enqueue transfer to shop owner
-      const payoutReference = `PAY-${uuidv4().slice(0, 8).toUpperCase()}`;
-      const payout = await payoutRepo.create({
-        shopId: payment.shopId,
-        paymentId: updatedPayment.id,
-        orderId,
-        amount: netAmount,
-        reference: payoutReference,
-      });
-      await enqueuePayout({ payoutId: payout.id, shopId: payment.shopId, reference: payoutReference });
-
-      // 4. SMS notifications
+      // 3. SMS notifications
       const amountGhs = (result.amount / 100).toFixed(2);
       await Promise.all([
         enqueueSms({
@@ -251,7 +234,7 @@ export class OrderController {
         }),
       ]);
 
-      logger.info('Payment verified via callback — payout queued, SMS sent', { orderId, reference });
+      logger.info('Payment verified via callback — SMS sent', { orderId, reference });
     } else if (result.status === 'failed') {
       order.markPaymentFailed();
       await orderRepo.update(order);
@@ -312,43 +295,156 @@ export class OrderController {
       );
     }
 
-    // ─── Transfer events (payout to shop owner) ───────────────────────────────
-    if (event === 'transfer.success' || event === 'transfer.failed' || event === 'transfer.reversed') {
-      const transferData = data as {
-        transfer_code: string;
-        reference: string;
-        status: string;
+    // ─── Subscription events ──────────────────────────────────────────────────
+    if (event === 'subscription.create') {
+      const subData = data as {
+        subscription_code: string;
+        email_token: string;
+        next_payment_date: string;
+        customer: { customer_code: string; email: string };
+        plan: { plan_code: string };
       };
 
-      const payout = await payoutRepo.findByTransferCode(transferData.transfer_code);
-      if (!payout) {
-        logger.warn('Transfer webhook: no matching payout found', {
-          transferCode: transferData.transfer_code,
-        });
+      // Find which shop this subscription belongs to via the customer email
+      const shopRow = await prisma.shop.findFirst({
+        where: {
+          owner: { email: subData.customer.email },
+        },
+        select: { id: true, name: true, owner: { select: { phone: true } } },
+      });
+
+      if (!shopRow) {
+        logger.warn('subscription.create: no shop found for customer email', { email: subData.customer.email });
         return;
       }
 
-      if (event === 'transfer.success') {
-        await payoutRepo.update(payout.id, {
-          status: 'paid',
-          paidAt: new Date(),
-        });
-        logger.info('Payout completed', {
-          payoutId: payout.id,
-          amount: payout.amount,
-          shopId: payout.shopId,
-        });
-      } else {
-        await payoutRepo.update(payout.id, {
-          status: 'failed',
-          failureReason: `Transfer ${event.replace('transfer.', '')} — code: ${transferData.transfer_code}`,
-        });
-        logger.warn('Payout transfer failed', {
-          payoutId: payout.id,
-          event,
-          transferCode: transferData.transfer_code,
+      const periodEnd = new Date(subData.next_payment_date);
+      const periodStart = new Date();
+
+      await prisma.$transaction([
+        prisma.shopSubscription.upsert({
+          where: { shopId: shopRow.id },
+          create: {
+            shopId: shopRow.id,
+            paystackPlanCode: subData.plan.plan_code,
+            paystackSubscriptionCode: subData.subscription_code,
+            paystackCustomerCode: subData.customer.customer_code,
+            paystackEmailToken: subData.email_token,
+            status: 'active',
+            currentPeriodStart: periodStart,
+            currentPeriodEnd: periodEnd,
+          },
+          update: {
+            paystackSubscriptionCode: subData.subscription_code,
+            paystackCustomerCode: subData.customer.customer_code,
+            paystackEmailToken: subData.email_token,
+            status: 'active',
+            currentPeriodStart: periodStart,
+            currentPeriodEnd: periodEnd,
+            cancelledAt: null,
+          },
+        }),
+        prisma.shop.update({
+          where: { id: shopRow.id },
+          data: { subscriptionStatus: 'active' },
+        }),
+      ]);
+
+      logger.info('Subscription created — shop activated', { shopId: shopRow.id, subscriptionCode: subData.subscription_code });
+    }
+
+    if (event === 'invoice.payment_success') {
+      const invoiceData = data as {
+        subscription: { subscription_code: string };
+        period_start: string;
+        period_end: string;
+      };
+
+      const sub = await prisma.shopSubscription.findFirst({
+        where: { paystackSubscriptionCode: invoiceData.subscription.subscription_code },
+      });
+      if (!sub) return;
+
+      await prisma.$transaction([
+        prisma.shopSubscription.update({
+          where: { id: sub.id },
+          data: {
+            status: 'active',
+            currentPeriodStart: new Date(invoiceData.period_start),
+            currentPeriodEnd: new Date(invoiceData.period_end),
+          },
+        }),
+        prisma.shop.update({
+          where: { id: sub.shopId },
+          data: { subscriptionStatus: 'active' },
+        }),
+      ]);
+
+      logger.info('Subscription renewed', { shopId: sub.shopId });
+    }
+
+    if (event === 'invoice.payment_failed') {
+      const invoiceData = data as {
+        subscription: { subscription_code: string };
+      };
+
+      const sub = await prisma.shopSubscription.findFirst({
+        where: { paystackSubscriptionCode: invoiceData.subscription.subscription_code },
+        include: { shop: { select: { id: true, name: true, owner: { select: { phone: true } } } } },
+      });
+      if (!sub) return;
+
+      await prisma.$transaction([
+        prisma.shopSubscription.update({
+          where: { id: sub.id },
+          data: { status: 'past_due' },
+        }),
+        prisma.shop.update({
+          where: { id: sub.shopId },
+          data: { subscriptionStatus: 'past_due' },
+        }),
+      ]);
+
+      await enqueueSms({
+        type: 'subscription_payment_failed',
+        phone: sub.shop.owner.phone,
+        shopName: sub.shop.name,
+      });
+
+      logger.warn('Subscription payment failed — shop marked past_due', { shopId: sub.shopId });
+    }
+
+    if (event === 'subscription.disable') {
+      const disableData = data as { subscription_code: string };
+
+      const sub = await prisma.shopSubscription.findFirst({
+        where: { paystackSubscriptionCode: disableData.subscription_code },
+        include: { shop: { select: { id: true, name: true, owner: { select: { phone: true } } } } },
+      });
+      if (!sub) return;
+
+      // Only update if not already cancelled (may have been set by the cancel endpoint)
+      if (sub.status !== 'cancelled') {
+        await prisma.$transaction([
+          prisma.shopSubscription.update({
+            where: { id: sub.id },
+            data: { status: 'cancelled', cancelledAt: new Date() },
+          }),
+          prisma.shop.update({
+            where: { id: sub.shopId },
+            data: { subscriptionStatus: 'cancelled' },
+          }),
+        ]);
+
+        await enqueueSms({
+          type: 'subscription_cancelled',
+          phone: sub.shop.owner.phone,
+          shopName: sub.shop.name,
         });
       }
+
+      logger.info('Subscription disabled', { shopId: sub.shopId });
     }
+
   }
 }

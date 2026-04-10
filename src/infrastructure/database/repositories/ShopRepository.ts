@@ -27,6 +27,8 @@ function toShop(row: PrismaShop): Shop {
 export class ShopRepository implements IShopRepository {
   async save(shop: Shop): Promise<void> {
     const d = shop.toJSON();
+    const trialDays = parseInt(process.env.TRIAL_DAYS ?? '30', 10);
+    const trialEndsAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000);
     await prisma.shop.create({
       data: {
         id: d.id,
@@ -41,6 +43,8 @@ export class ShopRepository implements IShopRepository {
         address: (d.address ?? undefined) as unknown as Prisma.InputJsonValue,
         status: d.status,
         currency: d.currency,
+        subscriptionStatus: 'trialing',
+        trialEndsAt,
         createdAt: d.createdAt,
         updatedAt: d.updatedAt,
       },

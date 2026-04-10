@@ -5,11 +5,14 @@ import { PaymentError } from '../../shared/errors';
 
 export interface InitializePaymentParams {
   email: string;
-  amount: number;         // In pesewas (Paystack uses kobo, but we convert for GHS)
+  amount: number;       // In pesewas
   reference: string;
   phone?: string;
   metadata?: Record<string, unknown>;
   callbackUrl?: string;
+  subaccount?: string;  // Paystack subaccount code (ACCT_xxx) for split payments
+  bearer?: 'account' | 'subaccount' | 'all'; // Who bears Paystack's transaction fee
+  plan?: string;        // Paystack plan code — auto-creates subscription after payment
 }
 
 export interface InitializePaymentResult {
@@ -28,52 +31,33 @@ export interface VerifyPaymentResult {
   metadata: Record<string, unknown>;
 }
 
-// ─── Transfer types ──────────────────────────────────────────────────────────
+// ─── Subaccount types ────────────────────────────────────────────────────────
 
-export interface CreateTransferRecipientParams {
-  type: 'mobile_money' | 'ghipss';
-  name: string;
-  accountNumber: string;  // Phone for mobile money, account number for bank
-  bankCode: string;       // 'MTN' | 'ATL' | 'VOD' for mobile money, bank code for ghipss
-  currency?: string;
+export interface CreateSubaccountParams {
+  businessName: string;
+  settlementBank: string;  // Bank code: 'MTN' | 'ATL' | 'VOD' for MoMo; bank code for GHIPSS
+  accountNumber: string;   // MoMo phone or bank account number
+  percentageCharge: number; // Platform commission % e.g. 5 = platform keeps 5%, shop gets 95%
+  primaryContactName?: string;
+  primaryContactEmail?: string;
+  primaryContactPhone?: string;
 }
 
-export interface CreateTransferRecipientResult {
-  recipientCode: string;
-  type: string;
-  accountName: string;
+export interface CreateSubaccountResult {
+  subaccountCode: string;  // e.g. ACCT_xxxxxxxxxx
+  businessName: string;
+  settlementBank: string;
   accountNumber: string;
-  bankCode: string;
-}
-
-export interface InitiateTransferParams {
-  amount: number;     // In pesewas
-  recipient: string;  // Paystack recipient_code
-  reason: string;
-  reference: string;  // Our internal payout reference
-}
-
-export interface InitiateTransferResult {
-  transferCode: string;
-  status: string;  // 'pending' | 'success' | 'failed'
-}
-
-export interface VerifyTransferResult {
-  status: 'success' | 'failed' | 'pending' | 'reversed' | 'otp';
-  transferCode: string;
-  amount: number;
-  reference: string;
 }
 
 /**
  * Paystack integration — primary payment gateway in Ghana.
  * Supports mobile money (MTN MoMo, Vodafone Cash, AirtelTigo Money) and cards.
- * Amount is always in the smallest unit (pesewas for GHS).
  *
- * Extended with Transfers API for the aggregator payout model:
- *   1. Platform collects payment from customer (existing charge flow)
- *   2. Platform deducts commission
- *   3. Platform sends remainder to shop owner via Transfer
+ * Uses Split Payments via subaccounts:
+ *   1. Shop registers once → Paystack subaccount created (ACCT_xxx stored on shop)
+ *   2. On each transaction, subaccount code is passed → Paystack auto-splits payment
+ *   3. Shop's cut lands in their MoMo/bank account next business day — no manual transfers
  */
 export class PaystackService {
   private readonly secretKey: string;
@@ -99,11 +83,14 @@ export class PaystackService {
         `${this.baseUrl}/transaction/initialize`,
         {
           email: params.email,
-          amount: params.amount, // Paystack uses kobo/pesewas natively
+          amount: params.amount,
           reference: params.reference,
           currency: 'GHS',
           channels: ['mobile_money', 'card', 'bank'],
           callback_url: params.callbackUrl,
+          plan: params.plan,
+          subaccount: params.subaccount,
+          bearer: params.subaccount ? (params.bearer ?? 'account') : undefined,
           metadata: {
             ...params.metadata,
             custom_fields: params.phone
@@ -166,118 +153,69 @@ export class PaystackService {
   }
 
   /**
-   * Register a transfer recipient (mobile money or bank account).
-   * Must be done before initiating a transfer to that account.
-   * The returned recipient_code is stored in TransferRecipient table.
+   * Create a Paystack subaccount for a shop.
+   * The returned subaccount_code is stored on the Shop record and passed on every
+   * transaction to automatically split payment between platform and shop owner.
    */
-  async createTransferRecipient(
-    params: CreateTransferRecipientParams
-  ): Promise<CreateTransferRecipientResult> {
+  async createSubaccount(params: CreateSubaccountParams): Promise<CreateSubaccountResult> {
     try {
       const response = await axios.post<{
         status: boolean;
         message: string;
         data: {
-          recipient_code: string;
-          type: string;
-          details: {
-            account_name: string;
-            account_number: string;
-            bank_code: string;
-          };
+          subaccount_code: string;
+          business_name: string;
+          settlement_bank: string;
+          account_number: string;
         };
       }>(
-        `${this.baseUrl}/transferrecipient`,
+        `${this.baseUrl}/subaccount`,
         {
-          type: params.type,
-          name: params.name,
+          business_name: params.businessName,
+          settlement_bank: params.settlementBank,
           account_number: params.accountNumber,
-          bank_code: params.bankCode,
-          currency: params.currency ?? 'GHS',
+          percentage_charge: params.percentageCharge,
+          primary_contact_name: params.primaryContactName,
+          primary_contact_email: params.primaryContactEmail,
+          primary_contact_phone: params.primaryContactPhone,
         },
         { headers: this.headers, timeout: 15000 }
       );
 
       if (!response.data.status) {
-        throw new PaymentError('Failed to create transfer recipient');
+        throw new PaymentError('Failed to create Paystack subaccount');
       }
 
       const { data } = response.data;
       return {
-        recipientCode: data.recipient_code,
-        type: data.type,
-        accountName: data.details.account_name,
-        accountNumber: data.details.account_number,
-        bankCode: data.details.bank_code,
+        subaccountCode: data.subaccount_code,
+        businessName: data.business_name,
+        settlementBank: data.settlement_bank,
+        accountNumber: data.account_number,
       };
     } catch (error) {
       if (error instanceof PaymentError) throw error;
-      logger.error('Paystack createTransferRecipient failed', { params, error });
-      throw new PaymentError('Failed to register transfer recipient');
+      const msg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      logger.error('Paystack createSubaccount failed', { error: msg ?? (error as Error).message });
+      throw new PaymentError(msg ?? 'Failed to create payout account');
     }
   }
 
   /**
-   * Initiate a transfer to a registered recipient.
-   * Paystack will process it and send a transfer.success / transfer.failed webhook.
+   * Disable (cancel) a Paystack subscription.
+   * Requires the subscription code and the email token sent with the subscription.create webhook.
    */
-  async initiateTransfer(params: InitiateTransferParams): Promise<InitiateTransferResult> {
+  async disableSubscription(subscriptionCode: string, emailToken: string): Promise<void> {
     try {
-      const response = await axios.post<{
-        status: boolean;
-        data: { transfer_code: string; status: string };
-      }>(
-        `${this.baseUrl}/transfer`,
-        {
-          source: 'balance',
-          amount: params.amount,
-          recipient: params.recipient,
-          reason: params.reason,
-          reference: params.reference,
-          currency: 'GHS',
-        },
+      await axios.post(
+        `${this.baseUrl}/subscription/disable`,
+        { code: subscriptionCode, token: emailToken },
         { headers: this.headers, timeout: 15000 }
       );
-
-      if (!response.data.status) {
-        throw new PaymentError('Failed to initiate transfer');
-      }
-
-      return {
-        transferCode: response.data.data.transfer_code,
-        status: response.data.data.status,
-      };
     } catch (error) {
-      if (error instanceof PaymentError) throw error;
-      logger.error('Paystack initiateTransfer failed', { reference: params.reference, error });
-      throw new PaymentError('Failed to initiate payout transfer');
-    }
-  }
-
-  /**
-   * Verify a transfer by its Paystack reference.
-   * Use this for manual checks — normally status comes via webhook.
-   */
-  async verifyTransfer(reference: string): Promise<VerifyTransferResult> {
-    try {
-      const response = await axios.get<{
-        status: boolean;
-        data: { status: string; transfer_code: string; amount: number; reference: string };
-      }>(
-        `${this.baseUrl}/transfer/verify/${encodeURIComponent(reference)}`,
-        { headers: this.headers, timeout: 15000 }
-      );
-
-      const { data } = response.data;
-      return {
-        status: data.status as VerifyTransferResult['status'],
-        transferCode: data.transfer_code,
-        amount: data.amount,
-        reference: data.reference,
-      };
-    } catch (error) {
-      logger.error('Paystack verifyTransfer failed', { reference, error });
-      throw new PaymentError('Transfer verification failed');
+      const msg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      logger.error('Paystack disableSubscription failed', { subscriptionCode, error: msg });
+      throw new PaymentError(msg ?? 'Failed to cancel subscription');
     }
   }
 
@@ -286,7 +224,7 @@ export class PaystackService {
    * Must be called before processing any webhook payload.
    */
   validateWebhookSignature(rawBody: string, signature: string): boolean {
-    const webhookSecret = process.env.PAYSTACK_SECRET_KEY ?? this.secretKey;
+    const webhookSecret = process.env.PAYSTACK_WEBHOOK_SECRET ?? this.secretKey;
     const hash = crypto
       .createHmac('sha512', webhookSecret)
       .update(rawBody)

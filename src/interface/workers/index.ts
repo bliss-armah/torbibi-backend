@@ -5,7 +5,6 @@
 import 'dotenv/config';
 import { createSmsWorker } from '../../infrastructure/queue/workers/sms.worker';
 import { createPaymentWorker } from '../../infrastructure/queue/workers/payment.worker';
-import { createPayoutWorker } from '../../infrastructure/queue/workers/payout.worker';
 import { checkRedisConnection } from '../../infrastructure/cache/redis';
 import { logger } from '../../shared/utils/logger';
 
@@ -16,7 +15,6 @@ async function startWorkers(): Promise<void> {
   const workers = [
     createSmsWorker(),
     createPaymentWorker(),
-    createPayoutWorker(),
   ];
 
   logger.info(`${workers.length} workers started`);

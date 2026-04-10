@@ -3,22 +3,18 @@ import { PaymentController } from '../controllers/PaymentController';
 import { validate } from '../middleware/validate.middleware';
 import { authenticate } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { RegisterRecipientSchema } from '../../../application/payments/dtos/payment.dto';
+import { RegisterSubaccountSchema } from '../../../application/payments/dtos/payment.dto';
 
 const router = Router();
 
-// All payment management routes require authentication
 router.use(authenticate);
 
-// Payout account registration — must register before any payouts can be sent
+// Payout subaccount — register once to enable automatic payment splitting per transaction
 router.post(
-  '/recipients/shop/:shopId',
-  validate(RegisterRecipientSchema),
-  asyncHandler(PaymentController.registerRecipient)
+  '/subaccount/shop/:shopId',
+  validate(RegisterSubaccountSchema),
+  asyncHandler(PaymentController.registerSubaccount)
 );
-router.get('/recipients/shop/:shopId', asyncHandler(PaymentController.getRecipient));
-
-// Payout history for a shop
-router.get('/payouts/shop/:shopId', asyncHandler(PaymentController.listPayouts));
+router.get('/subaccount/shop/:shopId', asyncHandler(PaymentController.getSubaccount));
 
 export default router;

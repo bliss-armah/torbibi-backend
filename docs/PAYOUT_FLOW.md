@@ -181,7 +181,7 @@ In **local development**, webhooks cannot reach `localhost`. The confirmation pa
 ```env
 PAYSTACK_SECRET_KEY=sk_live_...        # Used for API calls and webhook signature validation
 PAYSTACK_PUBLIC_KEY=pk_live_...        # Frontend (not currently used server-side)
-PLATFORM_COMMISSION_RATE=0.05          # Platform cut (default 5%)
+PLATFORM_COMMISSION_RATE=0.005          # Platform cut (default 0.5%)
 FRONTEND_URL=https://your-domain.com   # Used to build the Paystack callback URL
 APP_URL=https://api.your-domain.com    # Backend base URL
 ```

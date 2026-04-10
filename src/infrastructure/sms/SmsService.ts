@@ -81,6 +81,20 @@ export class SmsService {
       message: `New order ${orderNumber} received! Total: GHS ${total}. Login to your Torbibi dashboard to manage it.`,
     });
   }
+
+  async sendSubscriptionPaymentFailed(phone: string, shopName: string): Promise<SmsResult> {
+    return this.send({
+      to: phone,
+      message: `Your Torbibi subscription payment for ${shopName} failed. Please update your billing details to keep your shop active.`,
+    });
+  }
+
+  async sendSubscriptionCancelled(phone: string, shopName: string): Promise<SmsResult> {
+    return this.send({
+      to: phone,
+      message: `Your Torbibi subscription for ${shopName} has been cancelled. Your storefront is now suspended. Subscribe again to reactivate.`,
+    });
+  }
 }
 
 // Singleton — one instance serves all use cases

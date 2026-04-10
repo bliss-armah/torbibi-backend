@@ -4,7 +4,9 @@ export type SmsJobData =
   | { type: 'otp'; phone: string; code: string }
   | { type: 'order_confirmation'; phone: string; orderNumber: string; shopName: string }
   | { type: 'payment_confirmation'; phone: string; orderNumber: string; amount: string }
-  | { type: 'shop_owner_new_order'; phone: string; orderNumber: string; total: string };
+  | { type: 'shop_owner_new_order'; phone: string; orderNumber: string; total: string }
+  | { type: 'subscription_payment_failed'; phone: string; shopName: string }
+  | { type: 'subscription_cancelled'; phone: string; shopName: string };
 
 export async function enqueueSms(data: SmsJobData): Promise<void> {
   await smsQueue.add(data.type, data, {

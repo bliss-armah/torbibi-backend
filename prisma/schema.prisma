@@ -50,12 +50,11 @@ enum PaymentStatus {
   refunded
 }
 
-// Payout lifecycle: pending → processing (transfer initiated) → paid | failed
-enum PayoutStatus {
-  pending
-  processing
-  paid
-  failed
+enum SubscriptionStatus {
+  trialing
+  active
+  past_due
+  cancelled
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────
@@ -100,26 +99,33 @@ model Shop {
   slug           String     @unique
   description    String?
   logoUrl        String?    @map("logo_url")
-  // Cloudinary public_id for the logo — stored so we can delete/replace it
   logoPublicId   String?    @map("logo_public_id")
   bannerUrl      String?    @map("banner_url")
   bannerPublicId String?    @map("banner_public_id")
   phone          String
   email          String?
-  // Stored as JSON: { region, city, area?, digitalAddress? }
   address        Json?
   status         ShopStatus @default(active)
   currency       String     @default("GHS")
+  // Paystack subaccount code (ACCT_xxx) — set once when shop registers payout account.
+  // Passed on every transaction so Paystack auto-splits payment to shop at point of sale.
+  subaccountCode      String? @map("subaccount_code")
+  payoutType          String? @map("payout_type")
+  payoutAccountName   String? @map("payout_account_name")
+  payoutAccountNumber String? @map("payout_account_number")
+  payoutBankCode      String? @map("payout_bank_code")
+  // Subscription billing
+  subscriptionStatus  SubscriptionStatus @default(trialing) @map("subscription_status")
+  trialEndsAt         DateTime?          @map("trial_ends_at")
   createdAt      DateTime   @default(now()) @map("created_at")
   updatedAt      DateTime   @updatedAt      @map("updated_at")
 
-  owner             User               @relation(fields: [ownerId], references: [id])
-  products          Product[]
-  orders            Order[]
-  payments          Payment[]
-  orderCounter      OrderCounter?
-  payouts           Payout[]
-  transferRecipient TransferRecipient?
+  owner        User              @relation(fields: [ownerId], references: [id])
+  products     Product[]
+  orders       Order[]
+  payments     Payment[]
+  orderCounter OrderCounter?
+  subscription ShopSubscription?
 
   @@index([ownerId])
   @@index([status])
@@ -132,14 +138,11 @@ model Product {
   name           String
   slug           String
   description    String?
-  // Stored in pesewas (1 GHS = 100 pesewas) — avoids floating-point arithmetic
   price          Int
   compareAtPrice Int?          @map("compare_at_price")
   sku            String?
   quantity       Int           @default(0)
   trackInventory Boolean       @default(false) @map("track_inventory")
-  // Stored as JSON: ProductImage[] { url, publicId, alt, isPrimary }
-  // publicId added for Cloudinary delete/replace operations
   images         Json          @default("[]")
   categoryId     String?       @map("category_id")
   tags           String[]      @default([])
@@ -158,12 +161,10 @@ model Product {
 
 model Order {
   id               String        @id @default(uuid())
-  // Human-readable: TRB-000001 — generated via OrderCounter
   orderNumber      String        @unique @map("order_number")
   shopId           String        @map("shop_id")
   customerId       String        @map("customer_id")
   customerPhone    String        @map("customer_phone")
-  // Snapshot of line items at time of order — not product references
   items            Json
   subtotal         Int
   deliveryFee      Int           @default(0) @map("delivery_fee")
@@ -171,11 +172,9 @@ model Order {
   status           OrderStatus   @default(pending)
   paymentStatus    PaymentStatus @default(pending) @map("payment_status")
   paymentReference String?       @map("payment_reference")
-  // Snapshot of delivery address
   shippingAddress  Json          @map("shipping_address")
   notes            String?
   cancelReason     String?       @map("cancel_reason")
-  // Delivery logistics set by shop owner — driver phone + vehicle plate shown to buyer
   deliveryInfo     Json?         @map("delivery_info")
   createdAt        DateTime      @default(now()) @map("created_at")
   updatedAt        DateTime      @updatedAt      @map("updated_at")
@@ -183,7 +182,6 @@ model Order {
   shop     Shop      @relation(fields: [shopId], references: [id])
   customer User      @relation(fields: [customerId], references: [id])
   payments Payment[]
-  payouts  Payout[]
 
   @@index([shopId])
   @@index([shopId, status])
@@ -204,77 +202,39 @@ model Payment {
   status    PaymentStatus @default(pending)
   channel   String?
   metadata  Json?
-  // Aggregator commission fields — populated when payment is verified
-  // commissionRate: e.g. 0.05 for 5%, configurable via PLATFORM_COMMISSION_RATE env
-  commissionRate   Float? @map("commission_rate")
-  commissionAmount Int?   @map("commission_amount")
-  // netAmount = amount - commissionAmount (what the shop owner receives)
-  netAmount        Int?   @map("net_amount")
-  createdAt        DateTime      @default(now()) @map("created_at")
-  updatedAt        DateTime      @updatedAt      @map("updated_at")
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt      @map("updated_at")
 
-  order  Order  @relation(fields: [orderId], references: [id])
-  shop   Shop   @relation(fields: [shopId], references: [id])
-  payout Payout?
+  order Order @relation(fields: [orderId], references: [id])
+  shop  Shop  @relation(fields: [shopId], references: [id])
 
   @@index([orderId])
   @@index([shopId])
   @@map("payments")
 }
 
-// Stores Paystack transfer recipient codes per shop.
-// A shop must register their mobile money / bank details before payouts can be sent.
-model TransferRecipient {
-  id            String   @id @default(uuid())
-  shopId        String   @unique @map("shop_id")
-  recipientCode String   @map("recipient_code")  // Paystack recipient_code (e.g. RCP_xxx)
-  type          String   // 'mobile_money' | 'ghipss'
-  accountName   String   @map("account_name")
-  // For mobile money: phone number. For bank: account number.
-  accountNumber String   @map("account_number")
-  // Mobile money: 'MTN' | 'ATL' | 'VOD'. Bank: Paystack bank code.
-  bankCode      String   @map("bank_code")
-  currency      String   @default("GHS")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt      @map("updated_at")
+// Shop subscription — one active subscription per shop.
+// Created/updated via Paystack webhook events (subscription.create, invoice.payment_success, etc.)
+model ShopSubscription {
+  id                       String             @id @default(uuid())
+  shopId                   String             @unique @map("shop_id")
+  paystackPlanCode         String             @map("paystack_plan_code")
+  paystackSubscriptionCode String?            @map("paystack_subscription_code")
+  paystackCustomerCode     String?            @map("paystack_customer_code")
+  paystackEmailToken       String?            @map("paystack_email_token")
+  status                   SubscriptionStatus @default(trialing)
+  currentPeriodStart       DateTime?          @map("current_period_start")
+  currentPeriodEnd         DateTime?          @map("current_period_end")
+  cancelledAt              DateTime?          @map("cancelled_at")
+  createdAt                DateTime           @default(now()) @map("created_at")
+  updatedAt                DateTime           @updatedAt @map("updated_at")
 
-  shop Shop @relation(fields: [shopId], references: [id])
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
-  @@map("transfer_recipients")
-}
-
-// Tracks money owed and sent to shop owners.
-// One Payout per Payment — created after payment is verified and commission deducted.
-model Payout {
-  id            String       @id @default(uuid())
-  shopId        String       @map("shop_id")
-  paymentId     String       @unique @map("payment_id")
-  orderId       String       @map("order_id")
-  // Net amount in pesewas (order total minus platform commission)
-  amount        Int
-  status        PayoutStatus @default(pending)
-  // Our internal payout reference (PAY-{uuid})
-  reference     String       @unique
-  // Paystack transfer_code — populated when initiateTransfer is called
-  transferCode  String?      @map("transfer_code")
-  failureReason String?      @map("failure_reason")
-  paidAt        DateTime?    @map("paid_at")
-  createdAt     DateTime     @default(now()) @map("created_at")
-  updatedAt     DateTime     @updatedAt      @map("updated_at")
-
-  shop    Shop    @relation(fields: [shopId], references: [id])
-  payment Payment @relation(fields: [paymentId], references: [id])
-  order   Order   @relation(fields: [orderId], references: [id])
-
-  @@index([shopId])
-  @@index([status])
-  @@index([orderId])
-  @@map("payouts")
+  @@map("shop_subscriptions")
 }
 
 // Atomic per-shop order number counter.
-// upsert + increment on this row is safe under concurrent load
-// because PostgreSQL serializes the ON CONFLICT DO UPDATE on the locked row.
 model OrderCounter {
   shopId  String @id @map("shop_id")
   counter Int    @default(0)

@@ -35,14 +35,3 @@ export const paymentVerifyQueue = new Queue(QUEUE_NAMES.PAYMENT_VERIFY, {
   },
 });
 
-// Payout queue — higher retry count + longer backoff to handle transient Paystack issues.
-// Failed payouts are kept longer for manual review / reconciliation.
-export const payoutQueue = new Queue(QUEUE_NAMES.PAYOUT, {
-  connection,
-  defaultJobOptions: {
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 30000 }, // 30s, 60s, 120s, 240s, 480s
-    removeOnComplete: { count: 1000 },
-    removeOnFail: { count: 2000 },
-  },
-});

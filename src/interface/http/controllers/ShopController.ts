@@ -7,6 +7,7 @@ import { CreateShopDto, UpdateShopDto } from '../../../application/shops/dtos/sh
 import { NotFoundError, ForbiddenError, ValidationError } from '../../../shared/errors';
 import { cacheGet, cacheSet, cacheDel } from '../../../infrastructure/cache/redis';
 import { CACHE_PREFIX, CACHE_TTL } from '../../../shared/constants';
+import prisma from '../../../infrastructure/database/prisma';
 import { parsePagination } from '../../../shared/utils/pagination';
 
 const shopRepo = new ShopRepository();
@@ -40,6 +41,24 @@ export class ShopController {
 
     const shop = await shopRepo.findBySlug(slug);
     if (!shop) throw new NotFoundError('Shop');
+
+    // Check subscription access — trialing shops are accessible until trial expires
+    const row = await prisma.shop.findUnique({
+      where: { id: shop.id },
+      select: { subscriptionStatus: true, trialEndsAt: true },
+    });
+    const isTrialingAndValid =
+      row?.subscriptionStatus === 'trialing' &&
+      row.trialEndsAt != null &&
+      row.trialEndsAt > new Date();
+    const isActive = row?.subscriptionStatus === 'active';
+    if (!isActive && !isTrialingAndValid) {
+      res.status(403).json({
+        success: false,
+        error: { code: 'SHOP_SUSPENDED', message: 'This shop is temporarily unavailable.' },
+      });
+      return;
+    }
 
     const shopData = shop.toJSON();
     await cacheSet(cacheKey, shopData, CACHE_TTL.SHOP);

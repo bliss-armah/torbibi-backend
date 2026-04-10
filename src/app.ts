@@ -3,7 +3,6 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import morgan from 'morgan';
-import rateLimit from 'express-rate-limit';
 import routes from './interface/http/routes';
 import { errorHandler } from './interface/http/middleware/error.middleware';
 import { logger } from './shared/utils/logger';

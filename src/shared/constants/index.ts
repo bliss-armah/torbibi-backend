@@ -21,7 +21,6 @@ export const QUEUE_NAMES = {
   ORDER: 'order',
   PAYMENT_VERIFY: 'payment-verify',
   NOTIFICATIONS: 'notifications',
-  PAYOUT: 'payout',
 } as const;
 
 export const ORDER_STATUS = {
@@ -41,24 +40,11 @@ export const PAYMENT_STATUS = {
   REFUNDED: 'refunded',
 } as const;
 
-export const PAYOUT_STATUS = {
-  PENDING: 'pending',
-  PROCESSING: 'processing',
-  PAID: 'paid',
-  FAILED: 'failed',
-} as const;
-
 export const SHOP_STATUS = {
   ACTIVE: 'active',
   INACTIVE: 'inactive',
   SUSPENDED: 'suspended',
 } as const;
-
-// Platform commission rate — configurable via PLATFORM_COMMISSION_RATE env var.
-// Default: 5% (0.05). Deducted from every payment before the shop owner receives funds.
-export const DEFAULT_COMMISSION_RATE = parseFloat(
-  process.env.PLATFORM_COMMISSION_RATE ?? '0.05'
-);
 
 // Allowed image MIME types for upload validation
 export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;

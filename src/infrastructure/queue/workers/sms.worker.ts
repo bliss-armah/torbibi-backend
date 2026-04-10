@@ -43,6 +43,14 @@ export function createSmsWorker(): Worker {
           );
           break;
 
+        case 'subscription_payment_failed':
+          result = await smsService.sendSubscriptionPaymentFailed(data.phone, data.shopName);
+          break;
+
+        case 'subscription_cancelled':
+          result = await smsService.sendSubscriptionCancelled(data.phone, data.shopName);
+          break;
+
         default:
           throw new Error(`Unknown SMS job type: ${(data as SmsJobData).type}`);
       }
