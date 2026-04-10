@@ -35,19 +35,19 @@ export function createApp(): Application {
   );
 
   // Global API rate limit — OTP endpoints have their own stricter limits
-  app.use(
-    '/api/',
-    rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 5,
-      standardHeaders: true,
-      legacyHeaders: false,
-      message: {
-        success: false,
-        error: { code: 'TOO_MANY_REQUESTS', message: 'Too many requests' },
-      },
-    })
-  );
+  // app.use(
+  //   '/api/',
+  //   rateLimit({
+  //     windowMs: 15 * 60 * 1000,
+  //     max: 5,
+  //     standardHeaders: true,
+  //     legacyHeaders: false,
+  //     message: {
+  //       success: false,
+  //       error: { code: 'TOO_MANY_REQUESTS', message: 'Too many requests' },
+  //     },
+  //   })
+  // );
 
   app.use('/api/v1/orders/webhooks/paystack', express.raw({ type: 'application/json' }));
   app.use(express.json({ limit: '10mb' }));

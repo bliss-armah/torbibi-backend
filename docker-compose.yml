@@ -45,6 +45,9 @@ services:
       PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
       PAYSTACK_WEBHOOK_SECRET: ${PAYSTACK_WEBHOOK_SECRET}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,6 +93,7 @@ services:
       HUBTEL_CLIENT_SECRET: ${HUBTEL_CLIENT_SECRET}
       PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
       PLATFORM_COMMISSION_RATE: ${PLATFORM_COMMISSION_RATE:-0.05}
+      
     depends_on:
       postgres:
         condition: service_healthy

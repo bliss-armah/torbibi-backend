@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+const ProductImageSchema = z.object({
+  url: z.string().url('Image URL must be valid'),
+  alt: z.string().default(''),
+  isPrimary: z.boolean().default(false),
+});
+
 export const CreateProductSchema = z.object({
   name: z.string().min(2).max(200),
   description: z.string().max(2000).optional(),
@@ -10,6 +16,7 @@ export const CreateProductSchema = z.object({
   trackInventory: z.boolean().default(false),
   categoryId: z.string().uuid().optional(),
   tags: z.array(z.string().max(50)).max(20).default([]),
+  images: z.array(ProductImageSchema).max(5).default([]),
 });
 
 export const UpdateProductSchema = CreateProductSchema.partial();

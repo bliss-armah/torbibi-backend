@@ -32,6 +32,10 @@ export class UpdateProductUseCase {
       tags: dto.tags,
     });
 
+    if (dto.images !== undefined) {
+      product.setImages(dto.images);
+    }
+
     await this.productRepo.update(product);
 
     // Bust both the individual product cache and the shop's product list cache

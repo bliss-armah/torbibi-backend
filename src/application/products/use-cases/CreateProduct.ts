@@ -38,6 +38,10 @@ export class CreateProductUseCase {
       tags: dto.tags,
     });
 
+    if (dto.images && dto.images.length > 0) {
+      product.setImages(dto.images);
+    }
+
     await this.productRepo.save(product);
     await cacheDelPattern(`${CACHE_PREFIX.PRODUCT}shop:${shopId}:*`);
 
