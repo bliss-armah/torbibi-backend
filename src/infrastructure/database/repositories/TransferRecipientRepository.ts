@@ -27,7 +27,7 @@ export class TransferRecipientRepository {
         currency: data.currency ?? 'GHS',
       },
       create: {
-        shopId: data.shopId,
+        shop: { connect: { id: data.shopId } },
         recipientCode: data.recipientCode,
         type: data.type,
         accountName: data.accountName,

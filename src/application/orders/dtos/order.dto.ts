@@ -21,11 +21,20 @@ export const CreateOrderSchema = z.object({
   shippingAddress: ShippingAddressSchema,
   deliveryFee: z.number().int().min(0).default(0),
   notes: z.string().max(300).optional(),
+  email: z.string().email().optional(),
+});
+
+const DeliveryInfoSchema = z.object({
+  driverPhone: z.string().optional(),
+  vehicleNumber: z.string().optional(),
+  notes: z.string().max(300).optional(),
 });
 
 export const UpdateOrderStatusSchema = z.object({
-  status: z.enum(['confirmed', 'processing', 'shipped', 'delivered', 'cancelled']),
+  // 'confirmed' is no longer a manual option — it is set automatically on payment success
+  status: z.enum(['processing', 'shipped', 'delivered', 'cancelled']),
   cancelReason: z.string().max(300).optional(),
+  deliveryInfo: DeliveryInfoSchema.optional(),
 });
 
 export type CreateOrderDto = z.infer<typeof CreateOrderSchema>;

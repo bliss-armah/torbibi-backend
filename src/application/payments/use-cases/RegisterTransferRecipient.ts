@@ -38,7 +38,8 @@ export class RegisterTransferRecipientUseCase {
       shopId,
       recipientCode: result.recipientCode,
       type: result.type,
-      accountName: result.accountName,
+      // Paystack returns null accountName for mobile money — fall back to what the user entered
+      accountName: result.accountName || dto.accountName,
       accountNumber: result.accountNumber,
       bankCode: result.bankCode,
     });

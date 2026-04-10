@@ -5,7 +5,6 @@ import { IUserRepository } from '../../../domain/users/repositories/IUserReposit
 import { Order, OrderItem } from '../../../domain/orders/entities/Order';
 import { CreateOrderDto } from '../dtos/order.dto';
 import { NotFoundError, ValidationError, ForbiddenError } from '../../../shared/errors';
-import { enqueueSms } from '../../../infrastructure/queue/producers/sms.producer';
 import prisma from '../../../infrastructure/database/prisma';
 
 export class CreateOrderUseCase {
@@ -110,14 +109,6 @@ export class CreateOrderUseCase {
           data: { quantity: { decrement: item.quantity } },
         });
       }
-    });
-
-    // Notify the shop owner after the transaction commits (non-blocking)
-    await enqueueSms({
-      type: 'shop_owner_new_order',
-      phone: shop.phone,
-      orderNumber: order.orderNumber,
-      total: (order.total / 100).toFixed(2),
     });
 
     return order;

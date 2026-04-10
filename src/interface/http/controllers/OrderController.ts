@@ -12,6 +12,9 @@ import { User } from '../../../domain/users/entities/User';
 import { parsePagination } from '../../../shared/utils/pagination';
 import { paystackService } from '../../../infrastructure/payments/PaystackService';
 import { enqueuePaymentVerification } from '../../../infrastructure/queue/producers/payment.producer';
+import { enqueueSms } from '../../../infrastructure/queue/producers/sms.producer';
+import { enqueuePayout } from '../../../infrastructure/queue/producers/payout.producer';
+import { DEFAULT_COMMISSION_RATE } from '../../../shared/constants';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../../shared/utils/logger';
 
@@ -49,35 +52,41 @@ export class OrderController {
     const user = await userRepo.findById(customerId);
     const reference = `TRB-${uuidv4().slice(0, 8).toUpperCase()}`;
 
-    let paymentUrl: string | undefined;
+    // Build the Paystack email: prefer account email, then dto email, then a deterministic
+    // placeholder so every order (including guest/phone-only) goes through Paystack.
+    const paystackEmail =
+      user?.email ??
+      dto.email ??
+      `${order.customerPhone.replace(/\D/g, '')}@checkout.torbibi.com`;
 
-    if (user?.email) {
-      const paystack = await paystackService.initializePayment({
-        email: user.email,
-        amount: order.total,
-        reference,
-        phone: order.customerPhone,
-        metadata: { orderId: order.id, shopId },
-        callbackUrl: `${process.env.APP_URL}/api/v1/payments/callback`,
-      });
-      paymentUrl = paystack.authorizationUrl;
+    // Fetch shop slug so the callback can land on the right storefront confirmation page
+    const shop = await shopRepo.findById(shopId);
+    const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:3002';
+    const callbackUrl = `${frontendUrl}/${shop?.slug ?? shopId}/checkout/confirmation?orderId=${order.id}&orderNumber=${encodeURIComponent(order.orderNumber)}`;
 
-      // Persist the Payment record immediately so the worker can find it by reference.
-      // This also gives us a paper trail even if the customer never completes payment.
-      await paymentRepo.create({
-        orderId: order.id,
-        shopId,
-        amount: order.total,
-        reference,
-        metadata: { orderId: order.id, shopId },
-      });
-    }
+    const paystack = await paystackService.initializePayment({
+      email: paystackEmail,
+      amount: order.total,
+      reference,
+      phone: order.customerPhone,
+      metadata: { orderId: order.id, shopId },
+      callbackUrl,
+    });
+
+    // Persist the Payment record immediately so the worker can find it by reference.
+    await paymentRepo.create({
+      orderId: order.id,
+      shopId,
+      amount: order.total,
+      reference,
+      metadata: { orderId: order.id, shopId },
+    });
 
     res.status(201).json({
       success: true,
       data: {
         order: order.toJSON(),
-        paymentUrl,
+        paymentUrl: paystack.authorizationUrl,
         reference,
       },
     });
@@ -145,7 +154,6 @@ export class OrderController {
     if (!order) throw new NotFoundError('Order');
 
     switch (dto.status) {
-      case 'confirmed': order.confirm(); break;
       case 'processing': order.startProcessing(); break;
       case 'shipped': order.markShipped(); break;
       case 'delivered': order.markDelivered(); break;
@@ -155,7 +163,102 @@ export class OrderController {
         break;
     }
 
+    // Attach delivery logistics if provided (driver phone, vehicle number)
+    if (dto.deliveryInfo) {
+      order.setDeliveryInfo(dto.deliveryInfo);
+    }
+
     await orderRepo.update(order);
+    res.status(200).json({ success: true, data: { order: order.toJSON() } });
+  }
+
+  /**
+   * Callback-triggered payment verification.
+   *
+   * Paystack appends ?reference=... to the callback URL after payment.
+   * The frontend confirmation page calls this to verify and confirm the order
+   * immediately — without waiting for the webhook (which can't reach localhost in dev).
+   *
+   * Idempotent: if already paid, returns the order as-is without re-processing.
+   */
+  static async verifyPayment(req: Request, res: Response): Promise<void> {
+    const { orderId } = req.params;
+    const reference = req.query.reference as string | undefined;
+
+    if (!reference) throw new ValidationError('Reference is required', { reference: ['Required'] });
+
+    // Find the payment record to get shopId (no auth — orderId UUID = access token)
+    const payment = await paymentRepo.findByReference(reference);
+    if (!payment) throw new NotFoundError('Payment');
+
+    const [order, shop] = await Promise.all([
+      orderRepo.findByIdAndShopId(orderId, payment.shopId),
+      shopRepo.findById(payment.shopId),
+    ]);
+    if (!order || !shop) throw new NotFoundError('Order');
+
+    // Already fully processed — return current state (idempotent)
+    if (order.paymentStatus === 'paid') {
+      res.status(200).json({ success: true, data: { order: order.toJSON() } });
+      return;
+    }
+
+    const result = await paystackService.verifyPayment(reference);
+
+    if (result.status === 'success') {
+      // 1. Mark order confirmed
+      order.markPaymentReceived(reference);
+      await orderRepo.update(order);
+
+      // 2. Update payment record with commission breakdown
+      const commissionRate = DEFAULT_COMMISSION_RATE;
+      const commissionAmount = Math.floor(result.amount * commissionRate);
+      const netAmount = result.amount - commissionAmount;
+
+      const updatedPayment = await paymentRepo.update(payment.id, {
+        status: 'paid',
+        channel: result.channel,
+        commissionRate,
+        commissionAmount,
+        netAmount,
+      });
+
+      // 3. Create payout record and enqueue transfer to shop owner
+      const payoutReference = `PAY-${uuidv4().slice(0, 8).toUpperCase()}`;
+      const payout = await payoutRepo.create({
+        shopId: payment.shopId,
+        paymentId: updatedPayment.id,
+        orderId,
+        amount: netAmount,
+        reference: payoutReference,
+      });
+      await enqueuePayout({ payoutId: payout.id, shopId: payment.shopId, reference: payoutReference });
+
+      // 4. SMS notifications
+      const amountGhs = (result.amount / 100).toFixed(2);
+      await Promise.all([
+        enqueueSms({
+          type: 'payment_confirmation',
+          phone: order.customerPhone,
+          orderNumber: order.orderNumber,
+          amount: amountGhs,
+        }),
+        enqueueSms({
+          type: 'shop_owner_new_order',
+          phone: shop.phone,
+          orderNumber: order.orderNumber,
+          total: amountGhs,
+        }),
+      ]);
+
+      logger.info('Payment verified via callback — payout queued, SMS sent', { orderId, reference });
+    } else if (result.status === 'failed') {
+      order.markPaymentFailed();
+      await orderRepo.update(order);
+      await paymentRepo.update(payment.id, { status: 'failed' });
+      logger.warn('Payment failed via callback', { orderId, reference });
+    }
+
     res.status(200).json({ success: true, data: { order: order.toJSON() } });
   }
 

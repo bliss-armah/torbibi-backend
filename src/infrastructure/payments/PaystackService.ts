@@ -286,7 +286,7 @@ export class PaystackService {
    * Must be called before processing any webhook payload.
    */
   validateWebhookSignature(rawBody: string, signature: string): boolean {
-    const webhookSecret = process.env.PAYSTACK_WEBHOOK_SECRET ?? this.secretKey;
+    const webhookSecret = process.env.PAYSTACK_SECRET_KEY ?? this.secretKey;
     const hash = crypto
       .createHmac('sha512', webhookSecret)
       .update(rawBody)

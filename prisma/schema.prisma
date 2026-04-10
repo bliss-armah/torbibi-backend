@@ -175,6 +175,8 @@ model Order {
   shippingAddress  Json          @map("shipping_address")
   notes            String?
   cancelReason     String?       @map("cancel_reason")
+  // Delivery logistics set by shop owner — driver phone + vehicle plate shown to buyer
+  deliveryInfo     Json?         @map("delivery_info")
   createdAt        DateTime      @default(now()) @map("created_at")
   updatedAt        DateTime      @updatedAt      @map("updated_at")
 

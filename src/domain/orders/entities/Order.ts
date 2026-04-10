@@ -30,6 +30,12 @@ export interface ShippingAddress {
   notes?: string;
 }
 
+export interface DeliveryInfo {
+  driverPhone?: string;
+  vehicleNumber?: string;
+  notes?: string;
+}
+
 export interface OrderProps {
   id: string;
   orderNumber: string;  // Human-readable (e.g. TRB-00001)
@@ -46,6 +52,7 @@ export interface OrderProps {
   shippingAddress: ShippingAddress;
   notes: string | null;
   cancelReason: string | null;
+  deliveryInfo: DeliveryInfo | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -93,6 +100,7 @@ export class Order {
       shippingAddress: params.shippingAddress,
       notes: params.notes ?? null,
       cancelReason: null,
+      deliveryInfo: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -117,6 +125,7 @@ export class Order {
   get shippingAddress(): ShippingAddress { return { ...this.props.shippingAddress }; }
   get notes(): string | null { return this.props.notes; }
   get cancelReason(): string | null { return this.props.cancelReason; }
+  get deliveryInfo(): DeliveryInfo | null { return this.props.deliveryInfo; }
   get createdAt(): Date { return this.props.createdAt; }
   get updatedAt(): Date { return this.props.updatedAt; }
 
@@ -143,6 +152,11 @@ export class Order {
 
   startProcessing(): void {
     this.props.status = 'processing';
+    this.props.updatedAt = new Date();
+  }
+
+  setDeliveryInfo(info: DeliveryInfo): void {
+    this.props.deliveryInfo = info;
     this.props.updatedAt = new Date();
   }
 

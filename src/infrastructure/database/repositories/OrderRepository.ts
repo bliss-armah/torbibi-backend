@@ -1,6 +1,6 @@
 import { Prisma, Order as PrismaOrder } from '@prisma/client';
 import { IOrderRepository, OrderFilters } from '../../../domain/orders/repositories/IOrderRepository';
-import { Order, OrderItem, OrderStatus, PaymentStatus, ShippingAddress } from '../../../domain/orders/entities/Order';
+import { Order, OrderItem, OrderStatus, PaymentStatus, ShippingAddress, DeliveryInfo } from '../../../domain/orders/entities/Order';
 import { PaginatedResult, PaginationParams } from '../../../shared/types';
 import { buildPaginatedResult, paginationOffset } from '../../../shared/utils/pagination';
 import prisma from '../prisma';
@@ -22,6 +22,7 @@ function toOrder(row: PrismaOrder): Order {
     shippingAddress: row.shippingAddress as unknown as ShippingAddress,
     notes: row.notes,
     cancelReason: row.cancelReason,
+    deliveryInfo: (row.deliveryInfo as unknown as DeliveryInfo) ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });
@@ -62,6 +63,7 @@ export class OrderRepository implements IOrderRepository {
         paymentStatus: d.paymentStatus,
         paymentReference: d.paymentReference,
         cancelReason: d.cancelReason,
+        deliveryInfo: d.deliveryInfo ? (d.deliveryInfo as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     });
   }

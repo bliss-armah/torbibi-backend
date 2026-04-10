@@ -25,6 +25,9 @@ router.get('/my', authenticate, asyncHandler(OrderController.getMyOrders));
 router.get('/shop/:shopId/list', authenticate, asyncHandler(OrderController.listForShop));
 router.patch('/shop/:shopId/:orderId/status', authenticate, validate(UpdateOrderStatusSchema), asyncHandler(OrderController.updateStatus));
 
+// Public — verify payment via Paystack callback reference (called by confirmation page)
+router.post('/:orderId/verify-payment', asyncHandler(OrderController.verifyPayment));
+
 // Public — view single order by UUID (unguessable, serves as access token for guests)
 router.get('/:orderId', asyncHandler(OrderController.getOne));
 
