@@ -79,7 +79,17 @@ export class ProductController {
   static async update(req: Request, res: Response): Promise<void> {
     const { shopId, productId } = req.params;
     const dto = req.body as UpdateProductDto;
+
+    const before = await productRepo.findByIdAndShopId(productId, shopId);
+    const oldImages = before?.images ?? [];
+
     const product = await updateProductUseCase.execute(productId, shopId, req.user!.sub, dto);
+    if (dto.images !== undefined) {
+      const newUrls = new Set(dto.images.map((img) => img.url));
+      oldImages
+        .filter((img) => img.publicId && !newUrls.has(img.url))
+        .forEach(({ publicId }) => cloudinaryService.deleteImage(publicId!).catch(() => {}));
+    }
 
     res.status(200).json({ success: true, data: { product: product.toJSON() } });
   }

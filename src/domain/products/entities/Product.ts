@@ -4,6 +4,7 @@ export type ProductStatus = 'active' | 'draft' | 'archived';
 
 export interface ProductImage {
   url: string;
+  publicId?: string;
   alt: string;
   isPrimary: boolean;
 }

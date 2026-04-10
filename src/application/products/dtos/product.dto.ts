@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 const ProductImageSchema = z.object({
   url: z.string().url('Image URL must be valid'),
+  publicId: z.string().optional(),
   alt: z.string().default(''),
   isPrimary: z.boolean().default(false),
 });
