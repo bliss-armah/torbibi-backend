@@ -99,6 +99,20 @@ export class ShopRepository implements IShopRepository {
     return buildPaginatedResult(rows.map(toShop), total, params);
   }
 
+  async findAllActive(params: PaginationParams): Promise<PaginatedResult<Shop>> {
+    const where = { status: 'active' as const };
+    const [rows, total] = await prisma.$transaction([
+      prisma.shop.findMany({
+        where,
+        skip: paginationOffset(params),
+        take: params.limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.shop.count({ where }),
+    ]);
+    return buildPaginatedResult(rows.map(toShop), total, params);
+  }
+
   /**
    * Update only logo/banner URLs and their Cloudinary public IDs.
    * Kept separate from the entity update flow to avoid loading and re-mapping

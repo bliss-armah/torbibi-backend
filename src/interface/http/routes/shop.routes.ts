@@ -9,6 +9,7 @@ import { CreateShopSchema, UpdateShopSchema } from '../../../application/shops/d
 const router = Router();
 
 // Public
+router.get('/', asyncHandler(ShopController.listPublic));
 router.get('/:slug', asyncHandler(ShopController.getBySlug));
 
 // Protected — shop owners only

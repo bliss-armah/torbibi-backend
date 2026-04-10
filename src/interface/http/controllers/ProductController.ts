@@ -60,8 +60,17 @@ export class ProductController {
   }
 
   static async getOne(req: Request, res: Response): Promise<void> {
-    const { shopId, productId } = req.params;
-    const product = await productRepo.findByIdAndShopId(productId, shopId);
+    const { shopId, shopSlug, productId } = req.params;
+
+    // Dashboard route has :shopId; storefront route has :shopSlug — resolve either
+    let resolvedShopId = shopId;
+    if (!resolvedShopId && shopSlug) {
+      const shop = await shopRepo.findBySlug(shopSlug);
+      if (!shop) throw new NotFoundError('Shop');
+      resolvedShopId = shop.id;
+    }
+
+    const product = await productRepo.findByIdAndShopId(productId, resolvedShopId);
     if (!product) throw new NotFoundError('Product');
 
     res.status(200).json({ success: true, data: { product: product.toJSON() } });

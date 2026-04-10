@@ -7,12 +7,20 @@ import { CreateShopDto, UpdateShopDto } from '../../../application/shops/dtos/sh
 import { NotFoundError, ForbiddenError, ValidationError } from '../../../shared/errors';
 import { cacheGet, cacheSet, cacheDel } from '../../../infrastructure/cache/redis';
 import { CACHE_PREFIX, CACHE_TTL } from '../../../shared/constants';
+import { parsePagination } from '../../../shared/utils/pagination';
 
 const shopRepo = new ShopRepository();
 const userRepo = new UserRepository();
 const createShopUseCase = new CreateShopUseCase(shopRepo, userRepo);
 
 export class ShopController {
+  // Public: list all active shops (storefront discovery)
+  static async listPublic(req: Request, res: Response): Promise<void> {
+    const pagination = parsePagination(req.query as Record<string, string>);
+    const result = await shopRepo.findAllActive(pagination);
+    res.status(200).json({ success: true, data: result });
+  }
+
   static async create(req: Request, res: Response): Promise<void> {
     const dto = req.body as CreateShopDto;
     const shop = await createShopUseCase.execute(req.user!.sub, dto);

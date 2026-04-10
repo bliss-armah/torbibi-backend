@@ -8,6 +8,7 @@ import { PaymentRepository } from '../../../infrastructure/database/repositories
 import { PayoutRepository } from '../../../infrastructure/database/repositories/PayoutRepository';
 import { CreateOrderDto, UpdateOrderStatusDto } from '../../../application/orders/dtos/order.dto';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../../shared/errors';
+import { User } from '../../../domain/users/entities/User';
 import { parsePagination } from '../../../shared/utils/pagination';
 import { paystackService } from '../../../infrastructure/payments/PaystackService';
 import { enqueuePaymentVerification } from '../../../infrastructure/queue/producers/payment.producer';
@@ -26,9 +27,26 @@ export class OrderController {
   static async create(req: Request, res: Response): Promise<void> {
     const { shopId } = req.params;
     const dto = req.body as CreateOrderDto;
-    const order = await createOrderUseCase.execute(shopId, req.user!.sub, dto);
 
-    const user = await userRepo.findById(req.user!.sub);
+    // Resolve customer: authenticated user or guest identified by their phone number.
+    // For guests we find-or-create a minimal customer record so customerId is always set.
+    let customerId: string;
+    if (req.user?.sub) {
+      customerId = req.user.sub;
+    } else {
+      const phone = dto.shippingAddress.phone;
+      let existing = await userRepo.findByPhone(phone);
+      if (!existing) {
+        const guest = User.create({ phone, role: 'customer' });
+        await userRepo.save(guest);
+        existing = guest;
+      }
+      customerId = existing.id;
+    }
+
+    const order = await createOrderUseCase.execute(shopId, customerId, dto);
+
+    const user = await userRepo.findById(customerId);
     const reference = `TRB-${uuidv4().slice(0, 8).toUpperCase()}`;
 
     let paymentUrl: string | undefined;
@@ -68,7 +86,19 @@ export class OrderController {
   static async getMyOrders(req: Request, res: Response): Promise<void> {
     const pagination = parsePagination(req.query as Record<string, string>);
     const result = await orderRepo.findByCustomerId(req.user!.sub, pagination);
-    res.status(200).json({ success: true, data: result });
+
+    // Batch-fetch shop slugs so the frontend can link back to the right shop
+    const shopIds = [...new Set(result.data.map((o) => o.shopId))];
+    const shops = await Promise.all(shopIds.map((id) => shopRepo.findById(id)));
+    const slugMap: Record<string, string> = {};
+    shops.forEach((shop) => { if (shop) slugMap[shop.id] = shop.slug; });
+
+    const data = result.data.map((order) => ({
+      ...order.toJSON(),
+      shopSlug: slugMap[order.shopId] ?? null,
+    }));
+
+    res.status(200).json({ success: true, data: { ...result, data } });
   }
 
   static async getOne(req: Request, res: Response): Promise<void> {
@@ -76,11 +106,13 @@ export class OrderController {
     const order = await orderRepo.findById(orderId);
     if (!order) throw new NotFoundError('Order');
 
-    const isOwner = order.customerId === req.user!.sub;
-    const shop = await shopRepo.findById(order.shopId);
-    const isShopOwner = shop?.isOwnedBy(req.user!.sub) ?? false;
-
-    if (!isOwner && !isShopOwner) throw new ForbiddenError('Access denied');
+    // If authenticated, verify ownership; if not, UUID is sufficient authorization (unguessable)
+    if (req.user?.sub) {
+      const shop = await shopRepo.findById(order.shopId);
+      const isOwner = order.customerId === req.user.sub;
+      const isShopOwner = shop?.isOwnedBy(req.user.sub) ?? false;
+      if (!isOwner && !isShopOwner) throw new ForbiddenError('Access denied');
+    }
 
     res.status(200).json({ success: true, data: { order: order.toJSON() } });
   }

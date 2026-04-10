@@ -15,16 +15,17 @@ router.post(
   asyncHandler(OrderController.paystackWebhook)
 );
 
-// Authenticated routes
-router.use(authenticate);
-
-// Customer routes
-router.get('/my', asyncHandler(OrderController.getMyOrders));
-router.get('/:orderId', asyncHandler(OrderController.getOne));
+// Public — guests can place orders
 router.post('/shop/:shopId', validate(CreateOrderSchema), asyncHandler(OrderController.create));
 
-// Shop owner routes
-router.get('/shop/:shopId/list', asyncHandler(OrderController.listForShop));
-router.patch('/shop/:shopId/:orderId/status', validate(UpdateOrderStatusSchema), asyncHandler(OrderController.updateStatus));
+// Authenticated — must be registered before /:orderId to prevent "my" matching as an orderId
+router.get('/my', authenticate, asyncHandler(OrderController.getMyOrders));
+
+// Shop owner routes — /shop/ prefix avoids conflict with /:orderId
+router.get('/shop/:shopId/list', authenticate, asyncHandler(OrderController.listForShop));
+router.patch('/shop/:shopId/:orderId/status', authenticate, validate(UpdateOrderStatusSchema), asyncHandler(OrderController.updateStatus));
+
+// Public — view single order by UUID (unguessable, serves as access token for guests)
+router.get('/:orderId', asyncHandler(OrderController.getOne));
 
 export default router;
