@@ -102,6 +102,7 @@ model Shop {
   logoPublicId   String?    @map("logo_public_id")
   bannerUrl      String?    @map("banner_url")
   bannerPublicId String?    @map("banner_public_id")
+  brandColor     String?    @map("brand_color")   // Hex color e.g. "#F59E0B"
   phone          String
   email          String?
   address        Json?

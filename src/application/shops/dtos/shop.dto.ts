@@ -22,6 +22,7 @@ export const UpdateShopSchema = z.object({
   phone: z.string().regex(GHANA_PHONE_REGEX).optional(),
   email: z.string().email().optional(),
   address: AddressSchema.optional(),
+  brandColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a valid hex color').nullable().optional(),
 });
 
 export type CreateShopDto = z.infer<typeof CreateShopSchema>;

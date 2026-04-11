@@ -17,6 +17,7 @@ export interface ShopProps {
   description: string | null;
   logoUrl: string | null;
   bannerUrl: string | null;
+  brandColor: string | null; // Hex color for storefront theming e.g. "#F59E0B"
   phone: string;
   email: string | null;
   address: ShopAddress | null;
@@ -56,6 +57,7 @@ export class Shop {
       description: params.description ?? null,
       logoUrl: null,
       bannerUrl: null,
+      brandColor: null,
       phone: params.phone,
       email: params.email ?? null,
       address: params.address ?? null,
@@ -77,6 +79,7 @@ export class Shop {
   get description(): string | null { return this.props.description; }
   get logoUrl(): string | null { return this.props.logoUrl; }
   get bannerUrl(): string | null { return this.props.bannerUrl; }
+  get brandColor(): string | null { return this.props.brandColor; }
   get phone(): string { return this.props.phone; }
   get email(): string | null { return this.props.email; }
   get address(): ShopAddress | null { return this.props.address; }
@@ -99,12 +102,14 @@ export class Shop {
     email?: string;
     phone?: string;
     address?: ShopAddress;
+    brandColor?: string | null;
   }): void {
     if (params.name !== undefined) this.props.name = params.name;
     if (params.description !== undefined) this.props.description = params.description;
     if (params.email !== undefined) this.props.email = params.email;
     if (params.phone !== undefined) this.props.phone = params.phone;
     if (params.address !== undefined) this.props.address = params.address;
+    if (params.brandColor !== undefined) this.props.brandColor = params.brandColor;
     this.props.updatedAt = new Date();
   }
 
