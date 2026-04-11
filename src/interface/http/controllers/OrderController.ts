@@ -280,19 +280,26 @@ export class OrderController {
     if (event === 'charge.success') {
       const chargeData = data as {
         reference: string;
-        metadata: { orderId: string; shopId: string };
+        metadata?: Record<string, unknown>;
       };
+
+      const metadata = chargeData.metadata ?? {};
+      const orderId = metadata.orderId as string | undefined;
+      const shopId  = metadata.shopId  as string | undefined;
+
+      // Subscription payments (type:'subscription') and any other non-order charges
+      // arrive here too but carry no orderId — skip them silently.
+      if (!orderId || !shopId) {
+        logger.info('charge.success skipped — no orderId in metadata (subscription or non-order charge)', {
+          reference: chargeData.reference,
+          metadataType: metadata.type ?? 'unknown',
+        });
+        return;
+      }
 
       // Defer verification with a 2s delay to handle race conditions between
       // webhook delivery and our DB writes completing
-      await enqueuePaymentVerification(
-        {
-          orderId: chargeData.metadata.orderId,
-          reference: chargeData.reference,
-          shopId: chargeData.metadata.shopId,
-        },
-        2000
-      );
+      await enqueuePaymentVerification({ orderId, reference: chargeData.reference, shopId }, 2000);
     }
 
     // ─── Subscription events ──────────────────────────────────────────────────
@@ -305,13 +312,24 @@ export class OrderController {
         plan: { plan_code: string };
       };
 
-      // Find which shop this subscription belongs to via the customer email
-      const shopRow = await prisma.shop.findFirst({
-        where: {
-          owner: { email: subData.customer.email },
-        },
+      // Find the shop via the customer email.
+      // When the owner has no real email we generated a placeholder:
+      //   "${phone.replace(/\D/g, '')}@checkout.torbibi.com"  (e.g. "233241234567@checkout.torbibi.com")
+      // That placeholder is never stored on the user record, so we fall back to
+      // reconstructing the phone number and querying by that instead.
+      let shopRow = await prisma.shop.findFirst({
+        where: { owner: { email: subData.customer.email } },
         select: { id: true, name: true, owner: { select: { phone: true } } },
       });
+
+      if (!shopRow && subData.customer.email.endsWith('@checkout.torbibi.com')) {
+        const digits = subData.customer.email.split('@')[0]; // "233241234567"
+        const phone  = `+${digits}`;                         // "+233241234567"
+        shopRow = await prisma.shop.findFirst({
+          where: { owner: { phone } },
+          select: { id: true, name: true, owner: { select: { phone: true } } },
+        });
+      }
 
       if (!shopRow) {
         logger.warn('subscription.create: no shop found for customer email', { email: subData.customer.email });
